@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""
+Command‑line Battleship client.
+
+Commands
+--------
+battleship start                 → create a new game, store token locally
+battleship join <game_id>        → join an existing game, store token locally
+battleship status                → show current board & whose turn it is
+battleship fire <coord>          → fire at opponent (e.g. "E7")
+"""
+
+import sys, os, json, pathlib, requests
+from urllib.parse import urljoin
+
+SERVER_URL = "http://localhost:5000/"   # change if your server lives elsewhere
+TOKEN_FILE = pathlib.Path.home() / ".battleship" / "current"
+
+EMOJI = {
+    "unknown": "❓",
+    "miss":    "⚪",
+    "hit":     "💥",
+    "ship":    "🚢"
+}
+
+BOARD_SIZE = 10
+
+def _ensure_dir():
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+def _save_token(game_id, token):
+    _ensure_dir()
+    data = {"game_id": game_id, "token": token}
+    TOKEN_FILE.write_text(json.dumps(data))
+
+def _load_token():
+    if not TOKEN_FILE.is_file():
+        return None
+    try:
+        return json.loads(TOKEN_FILE.read_text())
+    except Exception:
+        return None
+
+def _clear_token():
+    if TOKEN_FILE.is_file():
+        TOKEN_FILE.unlink()
+
+def _print_board(state, my_token):
+    """
+    Render a 10×10 grid.
+    - My own hits/misses are shown on opponent side (unknown ships).
+    - Opponent's hits/misses are shown on my side (ships revealed only where hit).
+    """
+    # Build empty board
+    grid = [[EMOJI["unknown"] for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+
+    # Fill my view of opponent's board (only hits/misses)
+    opp = next(t for t in state["players"] if t != my_token)
+    opp_data = state["players"][opp]
+
+    for c in opp_data["hits"]:
+        col = ord(c[0]) - ord('A')
+        row = int(c[1:]) - 1
+        grid[row][col] = EMOJI["hit"]
+    for c in opp_data["misses"]:
+        col = ord(c[0]) - ord('A')
+        row = int(c[1:]) - 1
+        grid[row][col] = EMOJI["miss"]
+
+    # Show my own board (ships + opponent hits/misses)
+    my_data = state["players"][my_token]
+    # First place ships (hidden behind unknown unless hit)
+    # We'll overlay hits/misses later
+    # Ship locations are not sent to the client; we only know hits/misses.
+    # To give a visual cue, we render hits as ships.
+    for c in my_data["hits"]:
+        col = ord(c[0]) - ord('A')
+        row = int(c[1:]) - 1
+        grid[row][col] = EMOJI["ship"]
+    for c in my_data["misses"]:
+        col = ord(c[0]) - ord('A')
+        row = int(c[1:]) - 1
+        # Misses on my side are just empty water – keep unknown
+        pass
+
+    # Header
+    header = "   " + " ".join(chr(ord('A')+i) for i in range(BOARD_SIZE))
+    print(header)
+    for r in range(BOARD_SIZE):
+        line = f"{r+1:2d} " + " ".join(grid[r])
+        print(line)
+
+def _api(path, method="GET", json_body=None):
+    url = urljoin(SERVER_URL, path)
+    resp = requests.request(method, url, json=json_body)
+    if not resp.ok:
+        print(f"Error {resp.status_code}: {resp.text}", file=sys.stderr)
+        sys.exit(1)
+    return resp.json()
+
+def cmd_start(_):
+    # Create game
+    data = _api("games/start", "POST")
+    game_id = data["game_id"]
+    # Join as first player
+    join = _api(f"games/{game_id}/join", "POST")
+    token = join["token"]
+    _save_token(game_id, token)
+    print(f"New game created! ID = {game_id}")
+    print(f"Your token is stored at {TOKEN_FILE}")
+
+def cmd_join(args):
+    if len(args) != 1:
+        print("Usage: battleship join <GAME_ID>")
+        sys.exit(1)
+    game_id = args[0]
+    join = _api(f"games/{game_id}/join", "POST")
+    token = join["token"]
+    _save_token(game_id, token)
+    print(f"Joined game {game_id}. Token saved to {TOKEN_FILE}")
+
+def cmd_status(_):
+    cur = _load_token()
+    if not cur:
+        print("No active game. Use 'battleship start' or 'battleship join <id>'.")
+        return
+    state = _api(f"games/{cur['game_id']}/state")
+    print(f"Game ID: {cur['game_id']}")
+    print(f"Turn: {'you' if state['turn']==cur['token'] else 'opponent'}")
+    _print_board(state, cur['token'])
+
+def cmd_fire(args):
+    if len(args) != 1:
+        print("Usage: battleship fire <COORD>  (e.g. B5)")
+        sys.exit(1)
+    coord = args[0].upper()
+    cur = _load_token()
+    if not cur:
+        print("No active game.")
+        sys.exit(1)
+
+    # Verify it's our turn first
+    state = _api(f"games/{cur['game_id']}/state")
+    if state["turn"] != cur["token"]:
+        print("It's not your turn yet.")
+        return
+
+    payload = {"token": cur["token"], "coord": coord}
+    result = _api(f"games/{cur['game_id']}/move", "POST", json_body=payload)
+    print(f"You fired at {coord}: {result['result'].upper()}")
+
+    # Show updated board
+    new_state = _api(f"games/{cur['game_id']}/state")
+    _print_board(new_state, cur["token"])
+
+def cmd_quit(_):
+    _clear_token()
+    print("Current game cleared from local storage.")
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: battleship <command> [args]")
+        sys.exit(1)
+
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
+
+    commands = {
+        "start": cmd_start,
+        "join":  cmd_join,
+        "status":cmd_status,
+        "fire":  cmd_fire,
+        "quit":  cmd_quit,
+    }
+
+    if cmd not in commands:
+        print(f"Unknown command '{cmd}'. Available: {', '.join(commands)}")
+        sys.exit(1)
+
+    commands[cmd](args)
+
+if __name__ == "__main__":
+    main()
