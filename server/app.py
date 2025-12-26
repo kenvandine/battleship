@@ -258,7 +258,7 @@ def make_move(game_id):
     # Translate coordinate (e.g. "B5")
     # ------------------------------------------------------------------
     try:
-        col = ord(coord[0].upper()) - ord("A")
+        col = ord(coord[0].upper()) - ord('A')
         row = int(coord[1:]) - 1
     except Exception:
         abort(400, description="Coordinate format invalid (expected LetterNumber, e.g. B5)")
@@ -277,17 +277,21 @@ def make_move(game_id):
         result = "miss"
 
     # ------------------------------------------------------------------
-    # Check for a sunk ship (optional, nice UX)
+    # Check for a sunk ship (corrected logic)
     # ------------------------------------------------------------------
     sunk_letter = None
     sunk_name = None
     if hit:
-        ship_letter = cell
-        # Count how many hits we have on this particular ship type
-        hits_on_this_ship = sum(
-            1 for c in opponent["hits"]
-            if _coord_from_rc(int(c[1:]) - 1, ord(c[0].upper()) - ord("A")) == ship_letter
-        )
+        ship_letter = cell  # the letter of the ship we just hit
+
+        # Count how many of *this* ship's cells are present in opponent["hits"]
+        hits_on_this_ship = 0
+        for hit_coord in opponent["hits"]:
+            h_col = ord(hit_coord[0].upper()) - ord('A')
+            h_row = int(hit_coord[1:]) - 1
+            if opponent["board"][h_row][h_col] == ship_letter:
+                hits_on_this_ship += 1
+
         if hits_on_this_ship == SHIP_SIZES.get(ship_letter, 0):
             sunk_letter = ship_letter
             ship_names = {
@@ -309,12 +313,12 @@ def make_move(game_id):
     # --------------------------------------------------------------
     if sunk_letter:
         # After this hit we may have sunk the *last* ship of the opponent.
-        # Verify that **every** ship type of the opponent is fully hit.
+        # Verify that every ship type of the opponent is fully hit.
         all_sunk = True
         for s_letter, s_size in SHIP_SIZES.items():
             hits_on_type = sum(
                 1 for c in opponent["hits"]
-                if _coord_from_rc(int(c[1:]) - 1, ord(c[0].upper()) - ord("A")) == s_letter
+                if opponent["board"][int(c[1:]) - 1][ord(c[0].upper()) - ord('A')] == s_letter
             )
             if hits_on_type < s_size:
                 all_sunk = False
