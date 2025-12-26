@@ -29,7 +29,7 @@ EMOJI = {
     "ship_hit":"🔥",   # your own ship segment that the opponent has hit
 }
 
-BOARD_SIZE = 10
+BOARD_SIZE = 12
 
 def _ensure_dir():
     TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -63,23 +63,23 @@ def _fetch_state(game_id, token):
         sys.exit(1)
     return resp.json()
 
+# -----------------------------------------------------------------
+# Board rendering – now works for a 12×12 board
+# -----------------------------------------------------------------
 def _print_board(state, my_token):
     """
-    Render a 10×10 grid.
+    Render a 12×12 grid.
+
     - 🚢  : your ship segment that hasn't been hit.
     - 🔥  : your ship segment that the opponent has already hit.
     - 💥  : a hit you scored on the opponent.
     - ⚪  : a miss you scored on the opponent.
     - ❓  : unknown / water.
     """
-    # -----------------------------------------------------------------
-    # 1️⃣ Empty visual grid (unknown everywhere)
-    # -----------------------------------------------------------------
+    # Empty visual grid
     grid = [[EMOJI["unknown"] for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
 
-    # -----------------------------------------------------------------
-    # 2️⃣ Opponent‑side info (your hits/misses on opponent)
-    # -----------------------------------------------------------------
+    # Opponent‑side hits/misses (if opponent exists)
     player_tokens = list(state["players"].keys())
     try:
         opponent_token = next(t for t in player_tokens if t != my_token)
@@ -88,57 +88,50 @@ def _print_board(state, my_token):
         opponent_token = None
         opponent_exists = False
 
-    if not opponent_exists:
-        print("\n🕒 Waiting for the opponent to join this game...")
-        return
+    if opponent_exists:
+        opp_data = state["players"][opponent_token]
 
-    opp_data = state["players"][opponent_token]
+        for coord in opp_data["hits"]:
+            col = ord(coord[0]) - ord('A')
+            row = int(coord[1:]) - 1
+            grid[row][col] = EMOJI["hit"]          # 💥
 
-    for coord in opp_data["hits"]:
-        col = ord(coord[0]) - ord('A')
-        row = int(coord[1:]) - 1
-        grid[row][col] = EMOJI["hit"]          # 💥
+        for coord in opp_data["misses"]:
+            col = ord(coord[0]) - ord('A')
+            row = int(coord[1:]) - 1
+            grid[row][col] = EMOJI["miss"]         # ⚪
 
-    for coord in opp_data["misses"]:
-        col = ord(coord[0]) - ord('A')
-        row = int(coord[1:]) - 1
-        grid[row][col] = EMOJI["miss"]         # ⚪
-
-    # -----------------------------------------------------------------
-    # 3️⃣ Overlay YOUR OWN ships (private_board) and mark hits on them.
-    # -----------------------------------------------------------------
+    # Overlay YOUR own ships and mark any hits the opponent already made
     private_board = state.get("private_board")
     if private_board:
-        # Gather the opponent's hit list so we know which of OUR ships are hit.
-        opponent_hits = set(state["players"][my_token]["hits"])  # hits *against* us
+        opponent_hits = set()
+        if opponent_exists:
+            opponent_hits = set(state["players"][my_token]["hits"])
+
         for r in range(BOARD_SIZE):
             for c in range(BOARD_SIZE):
                 cell = private_board[r][c]
-                if cell != "~":                      # there is a ship here
+                if cell != "~":                     # there is a ship here
                     coord = f"{chr(ord('A')+c)}{r+1}"
                     if coord in opponent_hits:
-                        # Opponent already hit this segment
                         grid[r][c] = EMOJI["ship_hit"]   # 🔥
                     else:
-                        # Healthy segment
-                        # Preserve a hit marker (💥) if we already recorded a hit on opponent at the same spot;
-                        # otherwise show the ship.
                         if grid[r][c] == EMOJI["unknown"]:
                             grid[r][c] = EMOJI["ship"]   # 🚢
 
-    # -----------------------------------------------------------------
-    # 4️⃣ Header line (already aligned)
-    # -----------------------------------------------------------------
+    # Header line (aligned with cells)
     col_header = "   " + " ".join(chr(ord('A') + i) + " " for i in range(BOARD_SIZE))
     print(col_header.rstrip())
 
-    # -----------------------------------------------------------------
-    # 5️⃣ Rows
-    # -----------------------------------------------------------------
+    # Rows (right‑aligned row numbers)
     for r in range(BOARD_SIZE):
         row_label = f"{r+1:2d}"
         row_cells = " ".join(grid[r]) + " "
         print(f"{row_label} {row_cells.rstrip()}")
+
+    # If opponent hasn't joined yet, show a friendly note.
+    if not opponent_exists:
+        print("\n🕒 Waiting for the opponent to join this game...")
 
 def _api(path, method="GET", json_body=None):
     url = urljoin(SERVER_URL, path)
@@ -211,19 +204,19 @@ def cmd_fire(args):
 
     result = resp.json()
     # -----------------------------------------------------------------
-    # 1️⃣ Basic hit / miss output
+    # Basic hit / miss output
     # -----------------------------------------------------------------
     print(f"You fired at {coord}: {result['result'].upper()}")
 
     # -----------------------------------------------------------------
-    # 2️⃣ Did we sink something?
+    # Did we sink something?
     # -----------------------------------------------------------------
     if result.get("sunk"):
         sunk_name = result.get("sunk_name") or "a ship"
         print(f"🎉 You SUNK the opponent's {sunk_name}! 🎉")
 
     # -----------------------------------------------------------------
-    # 3️⃣ Refresh board (shows your own ships, hits on them, etc.)
+    # Refresh board (shows your own ships, hits on them, etc.)
     # -----------------------------------------------------------------
     new_state = _fetch_state(cur["game_id"], cur["token"])
     _print_board(new_state, cur["token"])
