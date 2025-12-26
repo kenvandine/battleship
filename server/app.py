@@ -29,7 +29,7 @@ GAMES_ROOT.mkdir(parents=True, exist_ok=True)
 # ----------- NEW: board size 12 × 12 -----------------------------------
 BOARD_SIZE = 12
 
-# Ship definitions stay the same (you can adjust sizes later if you wish)
+# Ship definitions
 SHIP_SIZES = {"A": 5, "B": 4, "S": 3, "D": 3, "P": 2}   # Aircraft, Battleship, Sub, Destroyer, Patrol
 
 # ----------------------------------------------------------------------
@@ -110,6 +110,7 @@ def start_game():
         "players": {},               # token → {"board":…, "hits": [], "misses": []}
         "turn": None,
         "created": uuid.uuid4().hex,
+        "winner": None,              # will hold the winning token when the game ends
     }
     _save_game(game_id, game)
     return jsonify({"game_id": game_id}), 201
@@ -170,6 +171,7 @@ def get_state(game_id):
         "id": game_id,
         "turn": game["turn"],
         "players": public_players,
+        "winner": game.get("winner"),   # None while the game is ongoing
     }), 200
 
 
@@ -233,6 +235,7 @@ def make_move(game_id):
     sunk_name = None
     if hit:
         ship_letter = cell
+        # Count how many hits we have on this particular ship type
         hits_on_this_ship = sum(
             1 for c in opponent["hits"]
             if _coord_from_rc(int(c[1:]) - 1, ord(c[0].upper()) - ord("A")) == ship_letter
@@ -252,6 +255,25 @@ def make_move(game_id):
     # Switch turn and persist
     # ------------------------------------------------------------------
     game["turn"] = opponent_token
+
+    # --------------------------------------------------------------
+    # WIN DETECTION – if the opponent has no remaining ships, declare winner
+    # --------------------------------------------------------------
+    if sunk_letter:
+        # After this hit we may have sunk the *last* ship of the opponent.
+        # Verify that **every** ship type of the opponent is fully hit.
+        all_sunk = True
+        for s_letter, s_size in SHIP_SIZES.items():
+            hits_on_type = sum(
+                1 for c in opponent["hits"]
+                if _coord_from_rc(int(c[1:]) - 1, ord(c[0].upper()) - ord("A")) == s_letter
+            )
+            if hits_on_type < s_size:
+                all_sunk = False
+                break
+        if all_sunk:
+            game["winner"] = token   # the player who just moved wins
+
     _save_game(game_id, game)
 
     return jsonify({
@@ -265,4 +287,4 @@ def make_move(game_id):
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     # Run with: FLASK_APP=app.py flask run --host=0.0.0.0 --port=5000
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=True)"""
