@@ -157,22 +157,70 @@ def join_game(game_id):
 
 @app.route("/games/<game_id>/state", methods=["GET"])
 def get_state(game_id):
+    """
+    Return the public game state **plus**:
+      * the caller’s private board (if a valid token is supplied)
+      * a per‑player list ``sunk_ships`` – the enemy ships that this
+        player has already sunk (derived from their hit list).
+      * the existing ``winner`` field.
+    """
     game = _load_game(game_id)
 
-    # Hide opponent ships – expose only hits/misses
+    # -----------------------------------------------------------------
+    # Public part – hits/misses for both players, whose turn it is.
+    # -----------------------------------------------------------------
     public_players = {}
     for token, pdata in game["players"].items():
         public_players[token] = {
-            "hits": pdata["hits"],
+            "hits":   pdata["hits"],
             "misses": pdata["misses"]
         }
 
-    return jsonify({
-        "id": game_id,
-        "turn": game["turn"],
-        "players": public_players,
-        "winner": game.get("winner"),   # None while the game is ongoing
-    }), 200
+    # -----------------------------------------------------------------
+    # Compute, for each player, which enemy ships they have already sunk.
+    # -----------------------------------------------------------------
+    sunk_info = {}   # token → list of ship letters that the *opponent* has lost
+    for token in game["players"]:
+        # Find the opponent token (the other player)
+        opponent_token = next(t for t in game["players"] if t != token)
+        opponent_board = game["players"][opponent_token]["board"]
+        hits = set(game["players"][token]["hits"])
+
+        sunk_this_player = []
+        for ship_letter, size in SHIP_SIZES.items():
+            # Count how many cells of this ship type are present in the hit list
+            hit_count = sum(
+                1
+                for r in range(BOARD_SIZE)
+                for c in range(BOARD_SIZE)
+                if opponent_board[r][c] == ship_letter
+                and _coord_from_rc(r, c) in hits
+            )
+            if hit_count == size:
+                sunk_this_player.append(ship_letter)
+
+        sunk_info[token] = sunk_this_player
+
+    # -----------------------------------------------------------------
+    # Private board – only for the caller (if they passed a valid token)
+    # -----------------------------------------------------------------
+    requester_token = request.args.get("token")
+    private_board = None
+    if requester_token and requester_token in game["players"]:
+        private_board = game["players"][requester_token]["board"]
+
+    # -----------------------------------------------------------------
+    # Assemble the full JSON response
+    # -----------------------------------------------------------------
+    response = {
+        "id":            game_id,
+        "turn":          game["turn"],
+        "players":       public_players,
+        "private_board": private_board,          # may be None for unauthenticated callers
+        "sunk_ships":    sunk_info,              # per‑player sunk‑enemy‑ship list
+        "winner":        game.get("winner")      # unchanged from earlier version
+    }
+    return jsonify(response), 200
 
 
 @app.route("/games/<game_id>/move", methods=["POST"])
@@ -287,4 +335,4 @@ def make_move(game_id):
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     # Run with: FLASK_APP=app.py flask run --host=0.0.0.0 --port=5000
-    app.run(host="0.0.0.0", port=5000, debug=True)"""
+    app.run(host="0.0.0.0", port=5000, debug=True)

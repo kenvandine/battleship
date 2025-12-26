@@ -280,7 +280,11 @@ def cmd_join(args):
 
 
 def cmd_status(_):
-    """Show the board, turn information, sunk ships and win state."""
+    """
+    Show the board, turn information, which of *your* ships have been hit,
+    and which opponent ships you have already sunk.  Also prints the win/
+    loss message if the game is over.
+    """
     cur = _load_token()
     if not cur:
         print("No active game. Use 'battleship start' or 'battleship join <id>'.")
@@ -291,7 +295,7 @@ def cmd_status(_):
     print(f"Turn: {'you' if state['turn'] == cur['token'] else 'opponent'}")
 
     # -----------------------------------------------------------------
-    # Win / loss detection
+    # Win / loss detection (unchanged)
     # -----------------------------------------------------------------
     winner = state.get("winner")
     if winner:
@@ -299,12 +303,12 @@ def cmd_status(_):
             print("\n🏆  You have WON the game!")
         else:
             print("\n💀  You have LOST the game.")
-        # Even after the game is over we still render the final board.
+        # Still render the final board for reference.
     else:
         print("\nGame in progress…")
 
     # -----------------------------------------------------------------
-    # Render the board
+    # Render the board (includes your own ships)
     # -----------------------------------------------------------------
     _print_board(state, cur["token"])
 
@@ -318,14 +322,24 @@ def cmd_status(_):
         print("\nAll your ships are still intact.")
 
     # -----------------------------------------------------------------
-    # List which opponent ships you have already sunk (if we have that info)
+    # List which opponent ships you have already sunk
     # -----------------------------------------------------------------
-    # The server currently only reports the ship sunk on the *last* move.
-    # For a full cumulative list you would need a server‑side change.
-    # Here we just inform the user if the most recent move sank something.
-    # (The `move` response already prints that info, so we keep this simple.)
-    # -----------------------------------------------------------------
-    # No extra output needed here.
+    # The server now provides a per‑player list under
+    #   state["players"][my_token]["sunk_ships"]
+    # It contains ship letters (e.g. ["B","P"]).  Convert them to friendly names.
+    opponent_sunk_letters = state["players"][cur["token"]].get("sunk_ships", [])
+    if opponent_sunk_letters:
+        ship_names = {
+            "A": "Aircraft Carrier",
+            "B": "Battleship",
+            "S": "Submarine",
+            "D": "Destroyer",
+            "P": "Patrol Boat",
+        }
+        opponent_sunk_names = [ship_names.get(l, l) for l in opponent_sunk_letters]
+        print("\nOpponent ships you have sunk:", ", ".join(opponent_sunk_names))
+    else:
+        print("\nYou have not sunk any opponent ships yet.")
 
 
 def cmd_fire(args):
