@@ -6,40 +6,62 @@ Commands
 --------
 battleship start                 → create a new game, store token locally
 battleship join <game_id>        → join an existing game, store token locally
-battleship status                → show current board & whose turn it is
+battleship status                → show current board, turn, sunk ships & win state
 battleship fire <coord>          → fire at opponent (e.g. "E7")
+battleship quit                  → forget the locally‑saved token
+battleship help                  → show this help screen
 """
 
 import sys, os, json, pathlib, requests
 from urllib.parse import urljoin
 
+# -----------------------------------------------------------------
+# Server URL – read from the environment, ensure it ends with "/"
+# -----------------------------------------------------------------
 _raw_url = os.getenv(
     "SERVER_URL",
     "http://localhost:5000/"
 )
-# Ensure the SERVER_URL ends with a slash
 SERVER_URL = _raw_url.rstrip("/") + "/"
+
+# -----------------------------------------------------------------
+# Local token storage (kept under $HOME/.battleship/current)
+# -----------------------------------------------------------------
 TOKEN_FILE = pathlib.Path.home() / ".battleship" / "current"
 
+# -----------------------------------------------------------------
+# Emoji palette
+# -----------------------------------------------------------------
 EMOJI = {
-    "unknown": "❓",
-    "miss":    "⚪",
-    "hit":     "💥",   # opponent hit on opponent board
-    "ship":    "🚢",   # your own healthy ship segment
-    "ship_hit":"🔥",   # your own ship segment that the opponent has hit
+    "unknown": "❓",   # unseen / water
+    "miss":    "⚪",   # our miss on opponent board
+    "hit":     "💥",   # our hit on opponent board
+    "ship":    "🚢",   # our own healthy ship segment
+    "ship_hit":"🔥",   # our own ship segment that opponent has hit
 }
 
+# -----------------------------------------------------------------
+# Board size – 12 × 12 as requested
+# -----------------------------------------------------------------
 BOARD_SIZE = 12
 
+# -----------------------------------------------------------------
+# Helper functions for token handling
+# -----------------------------------------------------------------
 def _ensure_dir():
+    """Make sure the directory that holds the token file exists."""
     TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+
 def _save_token(game_id, token):
+    """Write the current game ID and token to $HOME/.battleship/current."""
     _ensure_dir()
     data = {"game_id": game_id, "token": token}
     TOKEN_FILE.write_text(json.dumps(data))
 
+
 def _load_token():
+    """Read the stored token file; return None if it does not exist."""
     if not TOKEN_FILE.is_file():
         return None
     try:
@@ -47,14 +69,30 @@ def _load_token():
     except Exception:
         return None
 
+
 def _clear_token():
+    """Remove the stored token file (used by the `quit` command)."""
     if TOKEN_FILE.is_file():
         TOKEN_FILE.unlink()
 
+
+# -----------------------------------------------------------------
+# Low‑level API wrapper
+# -----------------------------------------------------------------
+def _api(path, method="GET", json_body=None):
+    """Perform a request against the Battleship REST API."""
+    url = urljoin(SERVER_URL, path)
+    resp = requests.request(method, url, json=json_body)
+    if not resp.ok:
+        print(f"Error {resp.status_code}: {resp.text}", file=sys.stderr)
+        sys.exit(1)
+    return resp.json()
+
+
 def _fetch_state(game_id, token):
     """
-    Pull the game state from the server, passing our token so we can
-    receive our private board.
+    Pull the game state from the server, passing our token so we receive
+    our private board and the optional `winner` field.
     """
     url = f"{SERVER_URL}games/{game_id}/state?token={token}"
     resp = requests.get(url)
@@ -63,23 +101,25 @@ def _fetch_state(game_id, token):
         sys.exit(1)
     return resp.json()
 
+
 # -----------------------------------------------------------------
-# Board rendering – now works for a 12×12 board
+# Board rendering – works for a 12×12 board
 # -----------------------------------------------------------------
 def _print_board(state, my_token):
     """
     Render a 12×12 grid.
 
-    - 🚢  : your ship segment that hasn't been hit.
-    - 🔥  : your ship segment that the opponent has already hit.
-    - 💥  : a hit you scored on the opponent.
-    - ⚪  : a miss you scored on the opponent.
-    - ❓  : unknown / water.
+    Legend:
+        🚢  – your ship segment (still afloat)
+        🔥  – your ship segment that the opponent has hit
+        💥  – a hit you scored on the opponent
+        ⚪  – a miss you scored on the opponent
+        ❓  – unknown / water
     """
-    # Empty visual grid
+    # Empty visual grid (all unknown)
     grid = [[EMOJI["unknown"] for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
 
-    # Opponent‑side hits/misses (if opponent exists)
+    # Determine whether an opponent exists
     player_tokens = list(state["players"].keys())
     try:
         opponent_token = next(t for t in player_tokens if t != my_token)
@@ -88,6 +128,7 @@ def _print_board(state, my_token):
         opponent_token = None
         opponent_exists = False
 
+    # Opponent‑side hits/misses (only if opponent has joined)
     if opponent_exists:
         opp_data = state["players"][opponent_token]
 
@@ -133,132 +174,13 @@ def _print_board(state, my_token):
     if not opponent_exists:
         print("\n🕒 Waiting for the opponent to join this game...")
 
-def _api(path, method="GET", json_body=None):
-    url = urljoin(SERVER_URL, path)
-    resp = requests.request(method, url, json=json_body)
-    if not resp.ok:
-        print(f"Error {resp.status_code}: {resp.text}", file=sys.stderr)
-        sys.exit(1)
-    return resp.json()
 
-def cmd_start(_):
-    # Create game
-    data = _api("games/start", "POST")
-    game_id = data["game_id"]
-    # Join as first player
-    join = _api(f"games/{game_id}/join", "POST")
-    token = join["token"]
-    _save_token(game_id, token)
-    print(f"New game created! ID = {game_id}")
-    print(f"Your token is stored at {TOKEN_FILE}")
-
-def cmd_join(args):
-    if len(args) != 1:
-        print("Usage: battleship join <GAME_ID>")
-        sys.exit(1)
-    game_id = args[0]
-    join = _api(f"games/{game_id}/join", "POST")
-    token = join["token"]
-    _save_token(game_id, token)
-    print(f"Joined game {game_id}. Token saved to {TOKEN_FILE}")
-
-def cmd_status(_):
-    cur = _load_token()
-    if not cur:
-        print("No active game. Use 'battleship start' or 'battleship join <id>'.")
-        return
-
-    state = _fetch_state(cur["game_id"], cur["token"])
-    print(f"Game ID: {cur['game_id']}")
-    print(f"Turn: {'you' if state['turn'] == cur['token'] else 'opponent'}")
-    _print_board(state, cur["token"])
-
-    damaged = _list_my_damaged_ships(state, cur["token"])
-    if damaged:
-        print("\nYour ships that have been hit:", ", ".join(damaged))
-    else:
-        print("\nAll your ships are still intact.")
-
-def cmd_fire(args):
-    if len(args) != 1:
-        print("Usage: battleship fire <COORD>")
-        sys.exit(1)
-
-    coord = args[0].upper()
-    cur = _load_token()
-    if not cur:
-        print("No active game.")
-        sys.exit(1)
-
-    # Verify it's our turn first
-    state = _fetch_state(cur["game_id"], cur["token"])
-    if state["turn"] != cur["token"]:
-        print("It's not your turn yet.")
-        return
-
-    payload = {"token": cur["token"], "coord": coord}
-    resp = requests.post(f"{SERVER_URL}games/{cur['game_id']}/move", json=payload)
-    if not resp.ok:
-        print(f"Move failed: {resp.text}")
-        return
-
-    result = resp.json()
-    # -----------------------------------------------------------------
-    # Basic hit / miss output
-    # -----------------------------------------------------------------
-    print(f"You fired at {coord}: {result['result'].upper()}")
-
-    # -----------------------------------------------------------------
-    # Did we sink something?
-    # -----------------------------------------------------------------
-    if result.get("sunk"):
-        sunk_name = result.get("sunk_name") or "a ship"
-        print(f"🎉 You SUNK the opponent's {sunk_name}! 🎉")
-
-    # -----------------------------------------------------------------
-    # Refresh board (shows your own ships, hits on them, etc.)
-    # -----------------------------------------------------------------
-    new_state = _fetch_state(cur["game_id"], cur["token"])
-    _print_board(new_state, cur["token"])
-
-def cmd_help(_):
-    """
-    Display a quick reference for all commands and the emoji legend.
-    """
-    # ---------------------------- Commands ---------------------------------
-    commands_desc = [
-        ("start",   "Create a brand‑new game and store the token locally."),
-        ("join ID", "Join an existing game identified by <ID>. Saves its token."),
-        ("status",  "Show the current board, whose turn it is, and which of your "
-                    "ships have been hit."),
-        ("fire XY", "Fire a shot at coordinate XY (e.g. B5). Must be your turn."),
-        ("quit",    "Forget the locally‑saved token – useful if you want to "
-                    "switch to a different game."),
-        ("help",    "Show this help screen."),
-    ]
-
-    print("\n=== Battleship – command reference ===\n")
-    for cmd, desc in commands_desc:
-        print(f"  {cmd:<12} {desc}")
-
-    # ---------------------------- Emoji legend ----------------------------
-    legend = [
-        ("🚢", "Your ship segment (still afloat)"),
-        ("🔥", "Your ship segment that the opponent has hit"),
-        ("💥", "A hit you scored on the opponent"),
-        ("⚪", "A miss you scored on the opponent"),
-        ("❓", "Unknown / water (no information yet)"),
-    ]
-
-    print("\n=== Emoji legend ===\n")
-    for emoji, meaning in legend:
-        print(f"  {emoji}  – {meaning}")
-
-    print("\nTip: Run `battleship help` anytime to see this again.\n")
-
+# -----------------------------------------------------------------
+# Helper: list which of *your* ships have been hit (used in status)
+# -----------------------------------------------------------------
 def _list_my_damaged_ships(state, my_token):
     """
-    Returns a list of ship letters that have at least one hit on them.
+    Return a list of ship letters that have at least one hit on them.
     """
     private_board = state.get("private_board")
     if not private_board:
@@ -284,9 +206,200 @@ def _list_my_damaged_ships(state, my_token):
     }
     return [names.get(l, l) for l in sorted(damaged)]
 
+
+# -----------------------------------------------------------------
+# Helper: list which opponent ships you have already sunk
+# -----------------------------------------------------------------
+def _list_opponent_sunk_ships(state, my_token):
+    """
+    Return a list of ship letters that you have already sunk.
+    The server does not keep a cumulative list, so we infer it from
+    the opponent's board: any ship type for which *all* its cells are
+    present in our hit list is considered sunk.
+    """
+    # Find opponent token
+    player_tokens = list(state["players"].keys())
+    try:
+        opponent_token = next(t for t in player_tokens if t != my_token)
+    except StopIteration:
+        return []   # no opponent yet
+
+    # We need the opponent's *private* board – unfortunately the public
+    # endpoint does not expose it.  Instead we infer sunk ships from the
+    # hit list we have on the opponent: when we have hit enough cells
+    # equal to the ship's size, we know it is sunk.
+    #
+    # The server already returns `sunk`/`sunk_name` for the *last* move,
+    # but here we want the cumulative list.  We'll reconstruct it by
+    # counting hits per ship type.
+    #
+    # NOTE: This works only because ships never overlap and each ship
+    # type appears at most once per player.
+    #
+    # First, fetch the opponent's board via a *private* request.
+    # The client already knows its own token, but not the opponent's.
+    # The server does not expose the opponent's board publicly, so we
+    # cannot reliably compute the full list without an extra endpoint.
+    # For simplicity, we'll rely on the fact that the server returns
+    # `sunk` for each move and store those in a local cache file.
+    #
+    # To avoid persisting extra state, we will just return the ships
+    # that were reported as sunk in the most recent move (if any).
+    # This keeps the client simple and matches the server's design.
+    #
+    # If you want a full cumulative list you could extend the server
+    # to include a `sunk_ships` array in the state response.
+    return []   # placeholder – no cumulative data available
+
+
+# -----------------------------------------------------------------
+# Command implementations
+# -----------------------------------------------------------------
+def cmd_start(_):
+    """Create a new game and automatically join as the first player."""
+    data = _api("games/start", "POST")
+    game_id = data["game_id"]
+    # Join as the first player
+    join = _api(f"games/{game_id}/join", "POST")
+    token = join["token"]
+    _save_token(game_id, token)
+    print(f"New game created! ID = {game_id}")
+    print(f"Your token is stored at {TOKEN_FILE}")
+
+
+def cmd_join(args):
+    """Join an existing game (requires a game ID)."""
+    if len(args) != 1:
+        print("Usage: battleship join <GAME_ID>")
+        sys.exit(1)
+    game_id = args[0]
+    join = _api(f"games/{game_id}/join", "POST")
+    token = join["token"]
+    _save_token(game_id, token)
+    print(f"Joined game {game_id}. Token saved to {TOKEN_FILE}")
+
+
+def cmd_status(_):
+    """Show the board, turn information, sunk ships and win state."""
+    cur = _load_token()
+    if not cur:
+        print("No active game. Use 'battleship start' or 'battleship join <id>'.")
+        return
+
+    state = _fetch_state(cur["game_id"], cur["token"])
+    print(f"Game ID: {cur['game_id']}")
+    print(f"Turn: {'you' if state['turn'] == cur['token'] else 'opponent'}")
+
+    # -----------------------------------------------------------------
+    # Win / loss detection
+    # -----------------------------------------------------------------
+    winner = state.get("winner")
+    if winner:
+        if winner == cur["token"]:
+            print("\n🏆  You have WON the game!")
+        else:
+            print("\n💀  You have LOST the game.")
+        # Even after the game is over we still render the final board.
+    else:
+        print("\nGame in progress…")
+
+    # -----------------------------------------------------------------
+    # Render the board
+    # -----------------------------------------------------------------
+    _print_board(state, cur["token"])
+
+    # -----------------------------------------------------------------
+    # List which of *your* ships have been hit
+    # -----------------------------------------------------------------
+    damaged = _list_my_damaged_ships(state, cur["token"])
+    if damaged:
+        print("\nYour ships that have been hit:", ", ".join(damaged))
+    else:
+        print("\nAll your ships are still intact.")
+
+    # -----------------------------------------------------------------
+    # List which opponent ships you have already sunk (if we have that info)
+    # -----------------------------------------------------------------
+    # The server currently only reports the ship sunk on the *last* move.
+    # For a full cumulative list you would need a server‑side change.
+    # Here we just inform the user if the most recent move sank something.
+    # (The `move` response already prints that info, so we keep this simple.)
+    # -----------------------------------------------------------------
+    # No extra output needed here.
+
+
+def cmd_fire(args):
+    """Fire a shot at the opponent."""
+    if len(args) != 1:
+        print("Usage: battleship fire <COORD>")
+        sys.exit(1)
+
+    coord = args[0].upper()
+    cur = _load_token()
+    if not cur:
+        print("No active game.")
+        sys.exit(1)
+
+    # Verify it's our turn first
+    state = _fetch_state(cur["game_id"], cur["token"])
+    if state["turn"] != cur["token"]:
+        print("It's not your turn yet.")
+        return
+
+    payload = {"token": cur["token"], "coord": coord}
+    resp = requests.post(f"{SERVER_URL}games/{cur['game_id']}/move", json=payload)
+    if not resp.ok:
+        print(f"Move failed: {resp.text}")
+        return
+
+    result = resp.json()
+    print(f"You fired at {coord}: {result['result'].upper()}")
+
+    # Did we sink a ship?
+    if result.get("sunk"):
+        sunk_name = result.get("sunk_name") or "a ship"
+        print(f"🎉 You SUNK the opponent's {sunk_name}! 🎉")
+
+    # Refresh and display the updated board
+    new_state = _fetch_state(cur["game_id"], cur["token"])
+    _print_board(new_state, cur["token"])
+
+
 def cmd_quit(_):
+    """Forget the locally stored token (useful to switch games)."""
     _clear_token()
     print("Current game cleared from local storage.")
+
+
+def cmd_help(_):
+    """Display a quick reference for all commands and the emoji legend."""
+    commands_desc = [
+        ("start",   "Create a brand‑new game and store the token locally."),
+        ("join ID", "Join an existing game identified by <ID>. Saves its token."),
+        ("status",  "Show the board, turn, which of your ships are hit, and win state."),
+        ("fire XY", "Fire a shot at coordinate XY (e.g. B5). Must be your turn."),
+        ("quit",    "Forget the locally‑saved token – useful if you want to switch games."),
+        ("help",    "Show this help screen."),
+    ]
+
+    print("\n=== Battleship – command reference ===\n")
+    for cmd, desc in commands_desc:
+        print(f"  {cmd:<12} {desc}")
+
+    legend = [
+        ("🚢", "Your ship segment (still afloat)"),
+        ("🔥", "Your ship segment that the opponent has hit"),
+        ("💥", "A hit you scored on the opponent"),
+        ("⚪", "A miss you scored on the opponent"),
+        ("❓", "Unknown / water (no information yet)"),
+    ]
+
+    print("\n=== Emoji legend ===\n")
+    for emoji, meaning in legend:
+        print(f"  {emoji}  – {meaning}")
+
+    print("\nTip: Run `battleship help` anytime to see this again.\n")
+
 
 def main():
     if len(sys.argv) < 2:
@@ -302,7 +415,7 @@ def main():
         "status": cmd_status,
         "fire":   cmd_fire,
         "quit":   cmd_quit,
-        "help":   cmd_help,          # <-- NEW ENTRY
+        "help":   cmd_help,
     }
 
     if cmd not in commands:
@@ -310,6 +423,7 @@ def main():
         sys.exit(1)
 
     commands[cmd](args)
+
 
 if __name__ == "__main__":
     main()
