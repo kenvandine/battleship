@@ -22,30 +22,35 @@ SNAP_COMMON = os.getenv("SNAP_COMMON")
 if SNAP_COMMON:
     GAMES_ROOT = Path(SNAP_COMMON) / "games"
 else:
-    # Development fallback – a sibling folder called "games"
     GAMES_ROOT = Path(__file__).parent / "games"
 
-GAMES_ROOT.mkdir(parents=True, exist_ok=True)   # create if missing
+GAMES_ROOT.mkdir(parents=True, exist_ok=True)
 
-BOARD_SIZE = 10
-SHIP_SIZES = {"A":5, "B":4, "S":3, "D":3, "P":2}   # Aircraft, Battleship, Sub, Destroyer, Patrol
+# ----------- NEW: board size 12 × 12 -----------------------------------
+BOARD_SIZE = 12
+
+# Ship definitions stay the same (you can adjust sizes later if you wish)
+SHIP_SIZES = {"A": 5, "B": 4, "S": 3, "D": 3, "P": 2}   # Aircraft, Battleship, Sub, Destroyer, Patrol
 
 # ----------------------------------------------------------------------
 # Helper utilities
 # ----------------------------------------------------------------------
 def _rand_id():
     """Human‑readable random word (6 lower‑case letters)."""
-    return ''.join(random.choice(string.ascii_lowercase) for _ in range(6))
+    return "".join(random.choice(string.ascii_lowercase) for _ in range(6))
+
 
 def _empty_board():
-    return [["~"]*BOARD_SIZE for _ in range(BOARD_SIZE)]
+    return [["~"] * BOARD_SIZE for _ in range(BOARD_SIZE)]
+
 
 def _game_path(game_id: str) -> Path:
-    """Full path to the JSON file for a given game."""
     return GAMES_ROOT / f"{game_id}.json"
+
 
 def _save_game(game_id, data):
     _game_path(game_id).write_text(json.dumps(data))
+
 
 def _load_game(game_id):
     p = _game_path(game_id)
@@ -53,26 +58,46 @@ def _load_game(game_id):
         abort(404, description="Game not found")
     return json.loads(p.read_text())
 
-def _place_ships_randomly(board):
-    """Naïve random placement – fine for a demo."""
+
+def _coord_from_rc(row: int, col: int) -> str:
+    """Convert numeric row/col to a Battleship coordinate string, e.g. (0,0) → 'A1'."""
+    return f"{chr(ord('A') + col)}{row + 1}"
+
+
+def _place_ships_randomly(board, blocked_coords=None):
+    """
+    Randomly place ships on *board*.
+
+    *blocked_coords* – a set of coordinate strings (e.g. {'A1','B2'})
+    that must **not** be used for any ship cell.  This is used when the
+    second player joins, to avoid overlapping the first player's ships.
+    """
+    blocked_coords = blocked_coords or set()
+
     for ship, size in SHIP_SIZES.items():
         placed = False
         while not placed:
             horiz = random.choice([True, False])
             if horiz:
-                r = random.randint(0, BOARD_SIZE-1)
-                c = random.randint(0, BOARD_SIZE-size)
-                cells = [(r, c+i) for i in range(size)]
+                r = random.randint(0, BOARD_SIZE - 1)
+                c = random.randint(0, BOARD_SIZE - size)
+                cells = [(r, c + i) for i in range(size)]
             else:
-                r = random.randint(0, BOARD_SIZE-size)
-                c = random.randint(0, BOARD_SIZE-1)
-                cells = [(r+i, c) for i in range(size)]
+                r = random.randint(0, BOARD_SIZE - size)
+                c = random.randint(0, BOARD_SIZE - 1)
+                cells = [(r + i, c) for i in range(size)]
 
+            # 1️⃣  Ensure none of the candidate cells overlap existing ships
+            # 2️⃣  Ensure none of the candidate cells are in *blocked_coords*
             if any(board[x][y] != "~" for x, y in cells):
                 continue
+            if any(_coord_from_rc(x, y) in blocked_coords for x, y in cells):
+                continue
+
             for x, y in cells:
                 board[x][y] = ship
             placed = True
+
 
 # ----------------------------------------------------------------------
 # Routes
@@ -84,10 +109,11 @@ def start_game():
         "id": game_id,
         "players": {},               # token → {"board":…, "hits": [], "misses": []}
         "turn": None,
-        "created": uuid.uuid4().hex
+        "created": uuid.uuid4().hex,
     }
     _save_game(game_id, game)
     return jsonify({"game_id": game_id}), 201
+
 
 @app.route("/games/<game_id>/join", methods=["POST"])
 def join_game(game_id):
@@ -98,90 +124,69 @@ def join_game(game_id):
 
     token = uuid.uuid4().hex
     board = _empty_board()
-    _place_ships_randomly(board)
+
+    # ------------------------------------------------------------------
+    # If a player is already in the game, collect all of *their* ship
+    # coordinates so we can forbid them for the newcomer.
+    # ------------------------------------------------------------------
+    blocked = set()
+    if game["players"]:                     # there is already one player
+        existing_board = next(iter(game["players"].values()))["board"]
+        for r in range(BOARD_SIZE):
+            for c in range(BOARD_SIZE):
+                if existing_board[r][c] != "~":
+                    blocked.add(_coord_from_rc(r, c))
+
+    # Place ships respecting the blocked set (may be empty for the first player)
+    _place_ships_randomly(board, blocked_coords=blocked)
 
     game["players"][token] = {
         "board": board,
-        "hits": [],
-        "misses": []
+        "hits": [],      # opponent's successful shots on this board
+        "misses": []     # opponent's missed shots on this board
     }
 
+    # First player to join gets the first turn
     if game["turn"] is None:
         game["turn"] = token
 
     _save_game(game_id, game)
     return jsonify({"token": token}), 200
 
+
 @app.route("/games/<game_id>/state", methods=["GET"])
 def get_state(game_id):
-    """
-    Public state plus (optionally) the private board of the requester.
-
-    Query parameters:
-        token (optional) – the player's secret token.
-    """
     game = _load_game(game_id)
 
-    # ------------------------------------------------------------------
-    # Gather the public portion (hits/misses + whose turn)
-    # ------------------------------------------------------------------
+    # Hide opponent ships – expose only hits/misses
     public_players = {}
     for token, pdata in game["players"].items():
         public_players[token] = {
-            "hits":   pdata["hits"],
+            "hits": pdata["hits"],
             "misses": pdata["misses"]
         }
 
-    # ------------------------------------------------------------------
-    # If the caller supplies a valid token, also attach THEIR board.
-    # This board is **private** – it is never sent to the opponent.
-    # ------------------------------------------------------------------
-    requester_token = request.args.get("token")
-    private_board = None
-    if requester_token and requester_token in game["players"]:
-        private_board = game["players"][requester_token]["board"]
-
-    response = {
-        "id":    game_id,
-        "turn":  game["turn"],
+    return jsonify({
+        "id": game_id,
+        "turn": game["turn"],
         "players": public_players,
-        # Include the private board only for the owner of the token.
-        "private_board": private_board
-    }
-    return jsonify(response), 200
+    }), 200
+
 
 @app.route("/games/<game_id>/move", methods=["POST"])
 def make_move(game_id):
     """
     Fire a shot at the opponent.
-
-    Expected JSON body:
-        {
-            "token": "<player‑token>",
-            "coord": "B5"
-        }
-
-    Returns (JSON):
-        {
-            "result": "hit" | "miss",
-            "hit": true | false,
-            "sunk": "<letter>" | null,          # optional – ship that was sunk
-            "sunk_name": "<friendly name>" | null
-        }
+    Expected JSON body: {"token":"…","coord":"B5"}
+    Returns JSON with result, hit flag, and optional sunk info.
     """
-    # -----------------------------------------------------------------
-    # 1️⃣ Validate payload
-    # -----------------------------------------------------------------
     payload = request.get_json(force=True)
-    token   = payload.get("token")
-    coord   = payload.get("coord")          # e.g. "B5"
+    token = payload.get("token")
+    coord = payload.get("coord")
 
     if not token or not coord:
-        abort(400, description="Missing 'token' or 'coord' in request body")
+        abort(400, description="Missing token or coord")
 
-    # -----------------------------------------------------------------
-    # 2️⃣ Load the game and basic sanity checks
-    # -----------------------------------------------------------------
     game = _load_game(game_id)
 
     if token not in game["players"]:
@@ -190,23 +195,20 @@ def make_move(game_id):
     if game["turn"] != token:
         abort(400, description="Not your turn")
 
-    # -----------------------------------------------------------------
-    # 3️⃣ **Make sure an opponent exists** before we try to pick one.
-    # -----------------------------------------------------------------
     if len(game["players"]) < 2:
         abort(400, description="Opponent has not joined the game yet")
 
-    # -----------------------------------------------------------------
-    # 4️⃣ Locate opponent token (the one that is NOT the caller)
-    # -----------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Locate opponent (the other token)
+    # ------------------------------------------------------------------
     opponent_token = next(t for t in game["players"] if t != token)
     opponent = game["players"][opponent_token]
 
-    # -----------------------------------------------------------------
-    # 5️⃣ Translate coordinate (e.g. "B5")
-    # -----------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Translate coordinate (e.g. "B5")
+    # ------------------------------------------------------------------
     try:
-        col = ord(coord[0].upper()) - ord('A')
+        col = ord(coord[0].upper()) - ord("A")
         row = int(coord[1:]) - 1
     except Exception:
         abort(400, description="Coordinate format invalid (expected LetterNumber, e.g. B5)")
@@ -214,9 +216,6 @@ def make_move(game_id):
     if not (0 <= row < BOARD_SIZE and 0 <= col < BOARD_SIZE):
         abort(400, description="Coordinate out of bounds")
 
-    # -----------------------------------------------------------------
-    # 6️⃣ Resolve hit / miss
-    # -----------------------------------------------------------------
     cell = opponent["board"][row][col]
     hit = cell != "~"
 
@@ -227,16 +226,16 @@ def make_move(game_id):
         opponent["misses"].append(coord.upper())
         result = "miss"
 
-    # -----------------------------------------------------------------
-    # 7️⃣ **Check for a sunk ship** (optional, but nice UX)
-    # -----------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Check for a sunk ship (optional, nice UX)
+    # ------------------------------------------------------------------
     sunk_letter = None
-    sunk_name   = None
+    sunk_name = None
     if hit:
-        # Count how many cells of this ship have been hit so far
         ship_letter = cell
         hits_on_this_ship = sum(
-            1 for c in opponent["hits"] if _coord_to_letter(c) == ship_letter
+            1 for c in opponent["hits"]
+            if _coord_from_rc(int(c[1:]) - 1, ord(c[0].upper()) - ord("A")) == ship_letter
         )
         if hits_on_this_ship == SHIP_SIZES.get(ship_letter, 0):
             sunk_letter = ship_letter
@@ -249,42 +248,21 @@ def make_move(game_id):
             }
             sunk_name = ship_names.get(ship_letter, "Unknown Ship")
 
-    # -----------------------------------------------------------------
-    # 8️⃣ Switch turn and persist the updated game state
-    # -----------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Switch turn and persist
+    # ------------------------------------------------------------------
     game["turn"] = opponent_token
     _save_game(game_id, game)
 
-    # -----------------------------------------------------------------
-    # 9️⃣ Return a well‑structured JSON response
-    # -----------------------------------------------------------------
-    response_payload = {
+    return jsonify({
         "result": result,
         "hit": hit,
         "sunk": sunk_letter,
         "sunk_name": sunk_name,
-    }
-    return jsonify(response_payload), 200
+    }), 200
 
-def _coord_to_letter(coord: str) -> str:
-    """
-    Given a coordinate string like "B5", return the character that sits on the
-    opponent's board at that position (e.g. "A", "B", "~").
-    This function is only used inside `make_move` after we already have the
-    opponent's board, so we read the current game file again to keep the
-    implementation simple.
-    """
-    # Retrieve the most recent game (the file was already written by _save_game)
-    # The game_id is available in the outer scope of `make_move`.
-    # We'll pull it from Flask's request view_args.
-    game_id = request.view_args["game_id"]
-    game = _load_game(game_id)
 
-    # Find the opponent token (the one that is NOT the caller)
-    caller_token = request.get_json(silent=True).get("token")
-    opponent_token = next(t for t in game["players"] if t != caller_token)
-    opponent_board = game["players"][opponent_token]["board"]
-
-    col = ord(coord[0].upper()) - ord("A")
-    row = int(coord[1:]) - 1
-    return opponent_board[row][col]
+# ----------------------------------------------------------------------
+if __name__ == "__main__":
+    # Run with: FLASK_APP=app.py flask run --host=0.0.0.0 --port=5000
+    app.run(host="0.0.0.0", port=5000, debug=False)

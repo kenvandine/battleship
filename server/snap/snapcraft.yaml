@@ -1,6 +1,6 @@
 name: battleship-server
 base: core24
-version: git
+version: 0.1
 summary: Async Battleship server
 description: |
   A Flask‑based REST API that hosts the asynchronous Battleship game.
