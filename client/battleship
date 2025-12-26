@@ -13,14 +13,20 @@ battleship fire <coord>          → fire at opponent (e.g. "E7")
 import sys, os, json, pathlib, requests
 from urllib.parse import urljoin
 
-SERVER_URL = "http://localhost:5000/"   # change if your server lives elsewhere
+_raw_url = os.getenv(
+    "SERVER_URL",
+    "http://localhost:5000/"
+)
+# Ensure the SERVER_URL ends with a slash
+SERVER_URL = _raw_url.rstrip("/") + "/"
 TOKEN_FILE = pathlib.Path.home() / ".battleship" / "current"
 
 EMOJI = {
     "unknown": "❓",
     "miss":    "⚪",
-    "hit":     "💥",
-    "ship":    "🚢"
+    "hit":     "💥",   # opponent hit on opponent board
+    "ship":    "🚢",   # your own healthy ship segment
+    "ship_hit":"🔥",   # your own ship segment that the opponent has hit
 }
 
 BOARD_SIZE = 10
@@ -45,50 +51,94 @@ def _clear_token():
     if TOKEN_FILE.is_file():
         TOKEN_FILE.unlink()
 
+def _fetch_state(game_id, token):
+    """
+    Pull the game state from the server, passing our token so we can
+    receive our private board.
+    """
+    url = f"{SERVER_URL}games/{game_id}/state?token={token}"
+    resp = requests.get(url)
+    if not resp.ok:
+        print(f"Error fetching state: {resp.text}", file=sys.stderr)
+        sys.exit(1)
+    return resp.json()
+
 def _print_board(state, my_token):
     """
     Render a 10×10 grid.
-    - My own hits/misses are shown on opponent side (unknown ships).
-    - Opponent's hits/misses are shown on my side (ships revealed only where hit).
+    - 🚢  : your ship segment that hasn't been hit.
+    - 🔥  : your ship segment that the opponent has already hit.
+    - 💥  : a hit you scored on the opponent.
+    - ⚪  : a miss you scored on the opponent.
+    - ❓  : unknown / water.
     """
-    # Build empty board
+    # -----------------------------------------------------------------
+    # 1️⃣ Empty visual grid (unknown everywhere)
+    # -----------------------------------------------------------------
     grid = [[EMOJI["unknown"] for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
 
-    # Fill my view of opponent's board (only hits/misses)
-    opp = next(t for t in state["players"] if t != my_token)
-    opp_data = state["players"][opp]
+    # -----------------------------------------------------------------
+    # 2️⃣ Opponent‑side info (your hits/misses on opponent)
+    # -----------------------------------------------------------------
+    player_tokens = list(state["players"].keys())
+    try:
+        opponent_token = next(t for t in player_tokens if t != my_token)
+        opponent_exists = True
+    except StopIteration:
+        opponent_token = None
+        opponent_exists = False
 
-    for c in opp_data["hits"]:
-        col = ord(c[0]) - ord('A')
-        row = int(c[1:]) - 1
-        grid[row][col] = EMOJI["hit"]
-    for c in opp_data["misses"]:
-        col = ord(c[0]) - ord('A')
-        row = int(c[1:]) - 1
-        grid[row][col] = EMOJI["miss"]
+    if not opponent_exists:
+        print("\n🕒 Waiting for the opponent to join this game...")
+        return
 
-    # Show my own board (ships + opponent hits/misses)
-    my_data = state["players"][my_token]
-    # First place ships (hidden behind unknown unless hit)
-    # We'll overlay hits/misses later
-    # Ship locations are not sent to the client; we only know hits/misses.
-    # To give a visual cue, we render hits as ships.
-    for c in my_data["hits"]:
-        col = ord(c[0]) - ord('A')
-        row = int(c[1:]) - 1
-        grid[row][col] = EMOJI["ship"]
-    for c in my_data["misses"]:
-        col = ord(c[0]) - ord('A')
-        row = int(c[1:]) - 1
-        # Misses on my side are just empty water – keep unknown
-        pass
+    opp_data = state["players"][opponent_token]
 
-    # Header
-    header = "   " + " ".join(chr(ord('A')+i) for i in range(BOARD_SIZE))
-    print(header)
+    for coord in opp_data["hits"]:
+        col = ord(coord[0]) - ord('A')
+        row = int(coord[1:]) - 1
+        grid[row][col] = EMOJI["hit"]          # 💥
+
+    for coord in opp_data["misses"]:
+        col = ord(coord[0]) - ord('A')
+        row = int(coord[1:]) - 1
+        grid[row][col] = EMOJI["miss"]         # ⚪
+
+    # -----------------------------------------------------------------
+    # 3️⃣ Overlay YOUR OWN ships (private_board) and mark hits on them.
+    # -----------------------------------------------------------------
+    private_board = state.get("private_board")
+    if private_board:
+        # Gather the opponent's hit list so we know which of OUR ships are hit.
+        opponent_hits = set(state["players"][my_token]["hits"])  # hits *against* us
+        for r in range(BOARD_SIZE):
+            for c in range(BOARD_SIZE):
+                cell = private_board[r][c]
+                if cell != "~":                      # there is a ship here
+                    coord = f"{chr(ord('A')+c)}{r+1}"
+                    if coord in opponent_hits:
+                        # Opponent already hit this segment
+                        grid[r][c] = EMOJI["ship_hit"]   # 🔥
+                    else:
+                        # Healthy segment
+                        # Preserve a hit marker (💥) if we already recorded a hit on opponent at the same spot;
+                        # otherwise show the ship.
+                        if grid[r][c] == EMOJI["unknown"]:
+                            grid[r][c] = EMOJI["ship"]   # 🚢
+
+    # -----------------------------------------------------------------
+    # 4️⃣ Header line (already aligned)
+    # -----------------------------------------------------------------
+    col_header = "   " + " ".join(chr(ord('A') + i) + " " for i in range(BOARD_SIZE))
+    print(col_header.rstrip())
+
+    # -----------------------------------------------------------------
+    # 5️⃣ Rows
+    # -----------------------------------------------------------------
     for r in range(BOARD_SIZE):
-        line = f"{r+1:2d} " + " ".join(grid[r])
-        print(line)
+        row_label = f"{r+1:2d}"
+        row_cells = " ".join(grid[r]) + " "
+        print(f"{row_label} {row_cells.rstrip()}")
 
 def _api(path, method="GET", json_body=None):
     url = urljoin(SERVER_URL, path)
@@ -124,15 +174,23 @@ def cmd_status(_):
     if not cur:
         print("No active game. Use 'battleship start' or 'battleship join <id>'.")
         return
-    state = _api(f"games/{cur['game_id']}/state")
+
+    state = _fetch_state(cur["game_id"], cur["token"])
     print(f"Game ID: {cur['game_id']}")
-    print(f"Turn: {'you' if state['turn']==cur['token'] else 'opponent'}")
-    _print_board(state, cur['token'])
+    print(f"Turn: {'you' if state['turn'] == cur['token'] else 'opponent'}")
+    _print_board(state, cur["token"])
+
+    damaged = _list_my_damaged_ships(state, cur["token"])
+    if damaged:
+        print("\nYour ships that have been hit:", ", ".join(damaged))
+    else:
+        print("\nAll your ships are still intact.")
 
 def cmd_fire(args):
     if len(args) != 1:
-        print("Usage: battleship fire <COORD>  (e.g. B5)")
+        print("Usage: battleship fire <COORD>")
         sys.exit(1)
+
     coord = args[0].upper()
     cur = _load_token()
     if not cur:
@@ -140,18 +198,98 @@ def cmd_fire(args):
         sys.exit(1)
 
     # Verify it's our turn first
-    state = _api(f"games/{cur['game_id']}/state")
+    state = _fetch_state(cur["game_id"], cur["token"])
     if state["turn"] != cur["token"]:
         print("It's not your turn yet.")
         return
 
     payload = {"token": cur["token"], "coord": coord}
-    result = _api(f"games/{cur['game_id']}/move", "POST", json_body=payload)
+    resp = requests.post(f"{SERVER_URL}games/{cur['game_id']}/move", json=payload)
+    if not resp.ok:
+        print(f"Move failed: {resp.text}")
+        return
+
+    result = resp.json()
+    # -----------------------------------------------------------------
+    # 1️⃣ Basic hit / miss output
+    # -----------------------------------------------------------------
     print(f"You fired at {coord}: {result['result'].upper()}")
 
-    # Show updated board
-    new_state = _api(f"games/{cur['game_id']}/state")
+    # -----------------------------------------------------------------
+    # 2️⃣ Did we sink something?
+    # -----------------------------------------------------------------
+    if result.get("sunk"):
+        sunk_name = result.get("sunk_name") or "a ship"
+        print(f"🎉 You SUNK the opponent's {sunk_name}! 🎉")
+
+    # -----------------------------------------------------------------
+    # 3️⃣ Refresh board (shows your own ships, hits on them, etc.)
+    # -----------------------------------------------------------------
+    new_state = _fetch_state(cur["game_id"], cur["token"])
     _print_board(new_state, cur["token"])
+
+def cmd_help(_):
+    """
+    Display a quick reference for all commands and the emoji legend.
+    """
+    # ---------------------------- Commands ---------------------------------
+    commands_desc = [
+        ("start",   "Create a brand‑new game and store the token locally."),
+        ("join ID", "Join an existing game identified by <ID>. Saves its token."),
+        ("status",  "Show the current board, whose turn it is, and which of your "
+                    "ships have been hit."),
+        ("fire XY", "Fire a shot at coordinate XY (e.g. B5). Must be your turn."),
+        ("quit",    "Forget the locally‑saved token – useful if you want to "
+                    "switch to a different game."),
+        ("help",    "Show this help screen."),
+    ]
+
+    print("\n=== Battleship – command reference ===\n")
+    for cmd, desc in commands_desc:
+        print(f"  {cmd:<12} {desc}")
+
+    # ---------------------------- Emoji legend ----------------------------
+    legend = [
+        ("🚢", "Your ship segment (still afloat)"),
+        ("🔥", "Your ship segment that the opponent has hit"),
+        ("💥", "A hit you scored on the opponent"),
+        ("⚪", "A miss you scored on the opponent"),
+        ("❓", "Unknown / water (no information yet)"),
+    ]
+
+    print("\n=== Emoji legend ===\n")
+    for emoji, meaning in legend:
+        print(f"  {emoji}  – {meaning}")
+
+    print("\nTip: Run `battleship help` anytime to see this again.\n")
+
+def _list_my_damaged_ships(state, my_token):
+    """
+    Returns a list of ship letters that have at least one hit on them.
+    """
+    private_board = state.get("private_board")
+    if not private_board:
+        return []
+
+    # Opponent's hits against us
+    opponent_hits = set(state["players"][my_token]["hits"])
+    damaged = set()
+    for coord in opponent_hits:
+        col = ord(coord[0]) - ord('A')
+        row = int(coord[1:]) - 1
+        ship_letter = private_board[row][col]
+        if ship_letter != "~":
+            damaged.add(ship_letter)
+
+    # Friendly names (same mapping used on the server)
+    names = {
+        "A": "Aircraft Carrier",
+        "B": "Battleship",
+        "S": "Submarine",
+        "D": "Destroyer",
+        "P": "Patrol Boat",
+    }
+    return [names.get(l, l) for l in sorted(damaged)]
 
 def cmd_quit(_):
     _clear_token()
@@ -159,18 +297,19 @@ def cmd_quit(_):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: battleship <command> [args]")
-        sys.exit(1)
+        cmd_help(None)
+        sys.exit(0)
 
     cmd = sys.argv[1]
     args = sys.argv[2:]
 
     commands = {
-        "start": cmd_start,
-        "join":  cmd_join,
-        "status":cmd_status,
-        "fire":  cmd_fire,
-        "quit":  cmd_quit,
+        "start":  cmd_start,
+        "join":   cmd_join,
+        "status": cmd_status,
+        "fire":   cmd_fire,
+        "quit":   cmd_quit,
+        "help":   cmd_help,          # <-- NEW ENTRY
     }
 
     if cmd not in commands:
