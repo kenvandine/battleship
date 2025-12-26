@@ -1,0 +1,59 @@
+name: battleship-server
+base: core24
+version: git
+summary: Async Battleship server
+description: |
+  A Flask‑based REST API that hosts the asynchronous Battleship game.
+  The snap bundles NGINX as a lightweight front‑end listening on port 9080
+  and proxies requests to the Flask app (running on 127.0.0.1:5000).
+
+grade: stable
+confinement: strict
+
+platforms:
+  amd64:
+
+parts:
+  battleship-server:
+    plugin: python
+    source: .
+    python-requirements: [requirements.txt]
+    stage-packages:
+      - nginx
+    override-build: |
+      craftctl default
+      cp app.py $CRAFT_PART_INSTALL/
+      mkdir -p $CRAFT_PART_INSTALL/bin
+      cp run-*.sh $CRAFT_PART_INSTALL/bin/
+      chmod +x $CRAFT_PART_INSTALL/bin/run-*.sh
+      rm -f $CRAFT_PART_INSTALL/etc/nginx/sites-enabled/default
+      # nginx.conf is in the part's source directory
+      cp $CRAFT_PART_SRC/nginx.conf $CRAFT_PART_INSTALL/etc/nginx/sites-available/battleship-server
+      ln -s ../sites-available/battleship-server $CRAFT_PART_INSTALL/etc/nginx/sites-enabled/battleship-server
+      sed -i -e 's|/var/log/nginx/error.log|/var/snap/battleship-server/common/nginx-error.log|g' $CRAFT_PART_INSTALL/etc/nginx/nginx.conf
+      sed -i -e 's|/var/log/nginx/access.log|/var/snap/battleship-server/common/nginx-access.log|g' $CRAFT_PART_INSTALL/etc/nginx/nginx.conf
+      sed -i -e 's|/run/nginx.pid|/var/snap/battleship-server/common/nginx.pid|g' $CRAFT_PART_INSTALL/etc/nginx/nginx.conf
+      sed -i -e 's|www-data|root|g' $CRAFT_PART_INSTALL/etc/nginx/nginx.conf
+
+apps:
+  server:
+    command: bin/run-gunicorn.sh
+    daemon: simple
+    restart-condition: always
+    plugs:
+      - network
+      - network-bind
+    environment:
+      PYTHONPATH: $SNAP:$SNAP/usr/lib/python3.13/site-packages:$PYTHONPATH
+
+  nginx:
+    command: bin/run-nginx.sh
+    daemon: simple
+    restart-condition: always
+    plugs:
+      - network
+      - network-bind
+
+layout:
+  /etc/nginx:
+    bind: $SNAP/etc/nginx
