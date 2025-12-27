@@ -19,4 +19,4 @@ pip install -r client/requirements.txt -r server/requirements.txt pytest coverag
 
 # Run tests
 echo "Running tests..."
-pytest server/tests/test_server.py client/tests/test_client.py
+pytest server/tests/test_server.py client/tests/test_client.py test_integration.py
