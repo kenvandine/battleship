@@ -8,9 +8,17 @@ from pathlib import Path
 import io
 
 # Add client directory to sys.path
-sys.path.append(str(Path(__file__).parents[2] / 'client'))
+CLIENT_DIR = Path(__file__).parents[2] / 'client'
+if str(CLIENT_DIR) not in sys.path:
+    sys.path.append(str(CLIENT_DIR))
 
-import battleship
+try:
+    import battleship
+except ImportError as e:
+    if "No module named" in str(e):
+        print(f"\nERROR: Missing dependencies. Please install client requirements:\n"
+              f"       pip install -r {CLIENT_DIR}/requirements.txt\n")
+    raise e
 
 class TestBattleshipClient(unittest.TestCase):
 

@@ -35,6 +35,22 @@ sudo mv battleship /usr/local/bin/
 battleship start          # creates a new game, stores token locally
 battleship status         # shows board & whose turn it is
 battleship fire B5        # fire a shot (when it’s your turn)
+
+## Running Tests
+
+To run the unit tests, you can use the provided `test.sh` script, which handles dependency installation and execution:
+
+```bash
+./test.sh
+```
+
+Alternatively, you can manually install dependencies and run pytest:
+
+```bash
+pip install -r client/requirements.txt -r server/requirements.txt pytest coverage
+pytest server/tests/test_server.py client/tests/test_client.py
+```
+
 Environment Variable
 $SNAP_COMMON – If set, the server will store all game JSON files under $SNAP_COMMON/games.
 This is useful when packaging the server as a Snap or when you want a central, write‑protected location.
