@@ -189,7 +189,7 @@ def get_state(game_id):
         # Find the opponent token (the other player)
         opponent_token = next(t for t in game["players"] if t != token)
         opponent_board = game["players"][opponent_token]["board"]
-        hits = set(game["players"][token]["hits"])
+        hits = set(game["players"][opponent_token]["hits"])
 
         sunk_this_player = []
         for ship_letter, size in SHIP_SIZES.items():
