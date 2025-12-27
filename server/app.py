@@ -110,7 +110,8 @@ def start_game():
         "players": {},               # token → {"board":…, "hits": [], "misses": []}
         "turn": None,
         "created": uuid.uuid4().hex,
-        "winner": None,              # will hold the winning token when the game ends
+        "winner": None,
+        "sunk_ships": {}             # <token> → list of ship letters this player has sunk
     }
     _save_game(game_id, game)
     return jsonify({"game_id": game_id}), 201
@@ -139,6 +140,7 @@ def join_game(game_id):
                     blocked.add(_coord_from_rc(r, c))
 
     # Place ships respecting the blocked set (may be empty for the first player)
+
     _place_ships_randomly(board, blocked_coords=blocked)
 
     game["players"][token] = {
@@ -146,6 +148,9 @@ def join_game(game_id):
         "hits": [],      # opponent's successful shots on this board
         "misses": []     # opponent's missed shots on this board
     }
+
+    # Ensure a slot for this player in the sunk‑ships dict
+    game["sunk_ships"][token] = []
 
     # First player to join gets the first turn
     if game["turn"] is None:
@@ -302,6 +307,7 @@ def make_move(game_id):
                 "P": "Patrol Boat",
             }
             sunk_name = ship_names.get(ship_letter, "Unknown Ship")
+            game["sunk_ships"][token].append(ship_letter)
 
     # ------------------------------------------------------------------
     # Switch turn and persist
@@ -339,4 +345,5 @@ def make_move(game_id):
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     # Run with: FLASK_APP=app.py flask run --host=0.0.0.0 --port=5000
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    PORT = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=PORT, debug=False)
