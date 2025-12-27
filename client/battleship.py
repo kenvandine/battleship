@@ -291,12 +291,10 @@ def cmd_status(_):
         return
 
     state = _fetch_state(cur["game_id"], cur["token"])
+
     print(f"Game ID: {cur['game_id']}")
     print(f"Turn: {'you' if state['turn'] == cur['token'] else 'opponent'}")
 
-    # -----------------------------------------------------------------
-    # Win / loss detection (unchanged)
-    # -----------------------------------------------------------------
     winner = state.get("winner")
     if winner:
         if winner == cur["token"]:
@@ -321,13 +319,14 @@ def cmd_status(_):
     else:
         print("\nAll your ships are still intact.")
 
-    # -----------------------------------------------------------------
-    # List which opponent ships you have already sunk
-    # -----------------------------------------------------------------
-    # The server now provides a per‑player list under
-    #   state["players"][my_token]["sunk_ships"]
-    # It contains ship letters (e.g. ["B","P"]).  Convert them to friendly names.
-    opponent_sunk_letters = state["players"][cur["token"]].get("sunk_ships", [])
+    opponent_sunk_letters = (
+        state.get("sunk_ships", {})
+            .get(cur["token"], [])
+        or state.get("players", {})
+            .get(cur["token"], {})
+            .get("sunk_ships", [])
+    )
+
     if opponent_sunk_letters:
         ship_names = {
             "A": "Aircraft Carrier",
