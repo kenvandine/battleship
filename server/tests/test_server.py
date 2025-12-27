@@ -7,9 +7,20 @@ import pytest
 from pathlib import Path
 
 # Add server directory to sys.path so we can import app
-sys.path.append(str(Path(__file__).parents[2] / 'server'))
+# We try to locate the server directory relative to this test file.
+# If running from repo root: server/tests/test_server.py -> parents[2] is repo root.
+# Repo root / 'server' is the server directory.
+SERVER_DIR = Path(__file__).parents[2] / 'server'
+if str(SERVER_DIR) not in sys.path:
+    sys.path.append(str(SERVER_DIR))
 
-from app import app, GAMES_ROOT, BOARD_SIZE, SHIP_SIZES
+try:
+    from app import app, GAMES_ROOT, BOARD_SIZE, SHIP_SIZES
+except ImportError as e:
+    if "No module named" in str(e):
+        print(f"\nERROR: Missing dependencies. Please install server requirements:\n"
+              f"       pip install -r {SERVER_DIR}/requirements.txt\n")
+    raise e
 
 @pytest.fixture
 def client():
@@ -17,10 +28,6 @@ def client():
     temp_dir = tempfile.mkdtemp()
 
     # We need to monkeypatch the GAMES_ROOT in the app module because it's calculated at module level.
-    # However, since it's already imported, we might need to rely on the fact that we can patch where it's used
-    # or reload the module. But `app.py` uses `GAMES_ROOT` global variable.
-
-    # A better approach for the test is to monkeypatch `app.GAMES_ROOT`
     import app as app_module
     original_games_root = app_module.GAMES_ROOT
     app_module.GAMES_ROOT = Path(temp_dir)
